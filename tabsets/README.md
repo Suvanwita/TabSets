@@ -1,106 +1,134 @@
 # TabSets — Named Browser Sessions
 
-**TabSets** is a lightweight, modern Manifest V3 Chrome browser extension built to organize, save, and restore browser tab sessions into named workspaces.
+**TabSets** is a lightweight, modern Manifest V3 Chrome browser extension built to capture, organize, save, and restore browser tab sessions into named workspaces.
 
 ---
 
-## 📁 Project Folder Structure
+## 🏗️ Architecture
+
+TabSets follows a clean, decoupled Chrome Extension (Manifest V3) architecture built with **HTML5**, **Vanilla CSS**, and **pure ES6+ JavaScript**:
 
 ```
 tabsets/
-├── manifest.json
+├── manifest.json            # Extension manifest (MV3)
 ├── popup/
-│   ├── index.html
-│   ├── style.css
-│   └── popup.js
+│   ├── index.html           # Popup window HTML structure & modal markup
+│   ├── style.css            # Dark mode theme system & CSS component styles
+│   └── popup.js             # UI controller, Chrome API tabs/storage handlers
 ├── background/
-│   └── service-worker.js
+│   └── service-worker.js    # Persistent MV3 service worker & storage initializer
 ├── icons/
-│   ├── icon16.png
-│   ├── icon48.png
-│   └── icon128.png
-└── README.md
+│   ├── icon16.png           # 16x16 Toolbar icon
+│   ├── icon48.png           # 48x48 Extension manager icon
+│   └── icon128.png          # 128x128 Web Store / App icon
+└── README.md                # Project documentation
 ```
 
----
-
-## ⚙️ How Each File Works
-
-### 1. `manifest.json`
-- Configures the extension using Chrome Manifest V3 specifications.
-- Declares extension metadata (name, description, version, icons).
-- Sets `popup/index.html` as the default popup action window.
-- Registers `background/service-worker.js` as the persistent event listener background script.
-- Requests minimal permissions: `tabs` (to capture open browser tab URLs & titles) and `storage` (to save workspaces locally).
-
-### 2. `popup/index.html`
-- Defines the HTML5 structure for the 380px wide extension popup window.
-- Header with extension branding title and subtitle.
-- Prominent `+ Save Current Tabs` main CTA button.
-- Real-time search input with clear button.
-- Dynamically rendered list container for saved workspace cards.
-- Integrated polished empty state for when no tab sets exist or search returns 0 results.
-- Accessible modal dialog for creating a new named workspace.
-- Contextual three-dot dropdown action menu template.
-
-### 3. `popup/style.css`
-- Custom CSS design system adhering to modern developer-tool aesthetics.
-- Palette built around curated HSL/hex dark slate theme tokens using CSS variables (`:root`).
-- Typography system with clean font hierarchy, badge indicators, subtle glassmorphism overlay effects, and custom scrollbars.
-- Micro-interactions for buttons, hover states, input focus rings, and animated modal pop-in transitions.
-- Fully responsive layout constrained to extension popup dimensions.
-
-### 4. `popup/popup.js`
-- Core UI interactivity and state management written in pure vanilla JavaScript (ES6+).
-- **Storage Manager**: Abstraction over `chrome.storage.local` with automatic fallback to `localStorage` when testing directly in a normal browser tab.
-- **Tab Manager**: Interface for `chrome.tabs.query` to capture active window tabs, fallback to mock data during local development.
-- **Modal Controller**: Handles opening, closing, keyboard `Escape` closing, backdrop click closing, and input autofocus/validation.
-- **Search & Filter Engine**: Filters tab sets dynamically as you type in the search bar.
-- **Card Context Menu**: Manages three-dot popup menus for opening, renaming, and deleting workspaces.
-
-### 5. `background/service-worker.js`
-- Manifest V3 background service worker script.
-- Listens for extension installation (`chrome.runtime.onInstalled`) and seeds initial mock workspace data into `chrome.storage.local` if no previous data exists.
-- Ready to handle background tab restoration and cross-window sync messages in future phases.
-
-### 6. `icons/` (`icon16.png`, `icon48.png`, `icon128.png`)
-- Custom-designed icon assets for Chrome extension toolbar, context menus, and extension manager grid.
+### Core Architecture Components:
+1. **Popup UI Controller (`popup/popup.js`)**: Manages real-time search filtering, DOM rendering, modal states, input validation, and user interaction.
+2. **Storage Helper Abstraction (`popup/popup.js`)**: Provides modular functions (`getTabSets()`, `saveTabSet()`, `deleteTabSet()`, `updateTabSet()`) for interacting with local storage.
+3. **Chrome Tabs API Integration (`popup/popup.js`)**: Queries active browser windows, captures tab metadata (`url`, `title`, `favicon`, `index`, `pinned`), and filters out internal, un-restorable browser pages.
+4. **Service Worker (`background/service-worker.js`)**: Background script that listens to extension events (`onInstalled`) and seeds initial storage if required.
 
 ---
 
-## 🚀 How to Load the Extension into Chrome
+## 💾 Storage Model
 
-Follow these simple steps to load TabSets as an unpacked extension:
+TabSets uses Chrome's `chrome.storage.local` API (with fallback to `localStorage` for non-extension browser preview environments).
 
-1. Open **Google Chrome**, **Brave**, or any Chromium-based browser.
-2. Navigate to `chrome://extensions` in the address bar (or go to **Menu ➔ Extensions ➔ Manage Extensions**).
-3. In the top-right corner of the Extensions page, enable **Developer mode** toggle.
-4. Click the **"Load unpacked"** button in the top-left toolbar.
-5. In the file picker dialog, select the `tabsets` directory:
+### Storage Key: `tabsets`
+
+Data is persisted under the `tabsets` key as an array of workspace objects:
+
+```json
+{
+  "tabsets": [
+    {
+      "id": "ts-1725894234567-a1b2c",
+      "name": "Cybersecurity Project",
+      "createdAt": 1725894234567,
+      "updatedAt": 1725894234567,
+      "tabs": [
+        {
+          "url": "https://owasp.org/www-project-top-ten/",
+          "title": "OWASP Top 10 Web Application Security Risks",
+          "favicon": "https://owasp.org/assets/images/favicon.ico",
+          "index": 0,
+          "pinned": false
+        },
+        {
+          "url": "https://portswigger.net/burp/documentation",
+          "title": "Burp Suite Documentation",
+          "favicon": "https://portswigger.net/favicon.ico",
+          "index": 1,
+          "pinned": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Storage Helpers (`popup/popup.js`):
+- `getTabSets()`: Asynchronously retrieves all saved workspaces array from storage.
+- `saveTabSet(tabSet)`: Persists a new workspace object (or updates an existing one).
+- `deleteTabSet(id)`: Removes a workspace from storage by unique identifier.
+- `updateTabSet(tabSet)`: Updates existing workspace name or tab data in storage.
+
+---
+
+## 🔐 Permissions Explanation
+
+TabSets requests only minimal, necessary permissions in `manifest.json`:
+
+| Permission | Purpose |
+| :--- | :--- |
+| `tabs` | Required to query open browser tabs in the currently active window, read tab titles, URLs, favicons, and restore workspaces in new windows. |
+| `storage` | Required to persist saved workspace data locally across browser sessions using `chrome.storage.local`. |
+
+---
+
+## 🚀 Installation Instructions
+
+Follow these steps to load TabSets into Google Chrome, Brave, or any Chromium browser:
+
+1. Open **Google Chrome** or any Chromium-based browser.
+2. Navigate to `chrome://extensions` in the address bar.
+3. In the top-right corner, enable the **Developer mode** toggle switch.
+4. Click the **Load unpacked** button in the top-left toolbar.
+5. Select the `tabsets` extension directory:
    ```
    /home/user/TabSets/tabsets
    ```
 6. Click **Select Folder**. The **TabSets — Named Browser Sessions** extension is now installed!
-7. Pin the extension icon to your Chrome toolbar for easy access.
+7. Pin the extension icon to your Chrome toolbar.
 
 ---
 
-## 🧪 How to Test the Popup
+## 🧪 Testing Instructions
 
-### Testing in Chrome Popup Mode:
-1. Click the **TabSets** icon in your browser toolbar to open the popup.
-2. **View Default Workspaces**: Verify the list displays example workspaces (*Cybersecurity Project*, *DSA Preparation*, *Research Paper*, *Placement Preparation*).
-3. **Search Filtering**: Type `DSA` or `Research` in the search bar to see instant card filtering. Click the `X` icon to clear search.
-4. **Saving a Workspace**:
-   - Click `+ Save Current Tabs`.
-   - The modal overlay will appear with the input focused.
-   - Enter a workspace name (e.g. `Sprint 3 Standup`) and click **Save** (or press `Enter`).
-   - Notice the new workspace immediately added to the top of the list!
-5. **Three-Dot Card Options**:
-   - Click the `...` menu button on any workspace card.
-   - Test **Rename** to change a workspace name.
-   - Test **Delete Workspace** to remove a card from `chrome.storage.local`.
-6. **Empty State**:
-   - Delete all workspaces or search for a non-existent word like `xyz123` to inspect the polished empty state layout.
-7. **Modal Dismissal**:
-   - Open the save modal and click outside on the dark backdrop or press `Escape` key to verify smooth closure.
+### 1. Saving Current Window Tabs:
+- Open several web pages in your browser window.
+- Click the **TabSets** extension icon in your toolbar.
+- Click **+ Save Current Tabs**.
+- Enter a unique workspace name (e.g., `Cybersecurity Research`) and click **Save** (or press `Enter`).
+- Verify that the modal closes automatically, the popup refreshes, and the new workspace card appears instantly at the top of the list!
+
+### 2. Validation & Edge Cases:
+- **Empty Name Validation**: Try saving with an empty input or whitespace. Verify that the error message `"Workspace name cannot be empty."` is displayed.
+- **Duplicate Name Validation**: Try saving with an existing workspace name (e.g. `Cybersecurity Research`). Verify the error message `"A workspace with this name already exists. Please choose a unique name."`.
+- **Internal Pages Handling**: Tabs like `chrome://extensions` or `about:blank` are automatically filtered out to ensure session restoration integrity.
+
+### 3. Workspace Operations:
+- **Open Workspace**: Click on any workspace card (or choose **Open Workspace** in the `...` menu) to restore all workspace tabs into a new browser window.
+- **Rename Workspace**: Click `...` ➔ **Rename**, enter a new name, and verify the name updates in real time.
+- **Delete Workspace**: Click `...` ➔ **Delete Workspace**, confirm deletion, and verify the card is removed from storage.
+- **Search Filtering**: Type a keyword in the search box to filter workspaces in real time. Click `X` to clear.
+
+---
+
+## 🔒 Privacy & Security Behavior
+
+- **100% Local Processing**: TabSets operates entirely within your local web browser.
+- **Zero Remote Transmission**: No URLs, page titles, favicons, or tab information are ever sent to an external server, backend database, analytics provider, or third party.
+- **No External Dependencies**: Built without external API calls, third-party JavaScript libraries, tracking pixels, or remote scripts.
