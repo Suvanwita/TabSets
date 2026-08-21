@@ -1,10 +1,10 @@
 /**
  * TabSets — Named Browser Sessions
- * Popup UI Logic, Storage Helpers & Chrome Tabs Integration
+ * Decoupled Architecture: StorageManager, TabManager, RestoreManager, ModalController, ToastController
  */
 
 document.addEventListener("DOMContentLoaded", () => {
-  // Default Mock Workspaces (used when storage is initialized for the first time)
+  // Default Mock Workspaces (used when storage is uninitialized)
   const INITIAL_MOCK_TABSETS = [
     {
       id: "ts-cybersecurity-01",
@@ -17,7 +17,7 @@ document.addEventListener("DOMContentLoaded", () => {
           title: "OWASP Top 10 Web Application Security Risks",
           favicon: "https://owasp.org/assets/images/favicon.ico",
           index: 0,
-          pinned: false
+          pinned: true
         },
         {
           url: "https://portswigger.net/burp/documentation",
@@ -135,10 +135,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const AppState = {
     tabSets: [],
     searchQuery: "",
-    activeDropdownId: null
+    activeDropdownId: null,
+    targetWorkspaceId: null // Stores target tabSet ID for Rename/Update/Delete modals
   };
 
-  // DOM Elements Reference
+  // DOM Cache
   const DOM = {
     btnOpenSaveModal: document.getElementById("btn-open-save-modal"),
     searchInput: document.getElementById("search-input"),
@@ -149,241 +150,339 @@ document.addEventListener("DOMContentLoaded", () => {
     emptyStateTitle: document.getElementById("empty-state-title"),
     emptyStateSubtitle: document.getElementById("empty-state-subtitle"),
     
-    // Modal Elements
+    // Toast Banner
+    toastBanner: document.getElementById("toast-banner"),
+    toastIcon: document.getElementById("toast-icon"),
+    toastMessage: document.getElementById("toast-message"),
+
+    // Save Modal
     saveModalBackdrop: document.getElementById("save-modal-backdrop"),
-    btnCloseModal: document.getElementById("btn-close-modal"),
-    btnModalCancel: document.getElementById("btn-modal-cancel"),
+    btnCloseSaveModal: document.getElementById("btn-close-modal"),
+    btnSaveCancel: document.getElementById("btn-modal-cancel"),
+    btnSaveSubmit: document.getElementById("btn-modal-save"),
     saveForm: document.getElementById("save-tabset-form"),
-    workspaceNameInput: document.getElementById("workspace-name-input"),
-    formError: document.getElementById("form-error"),
+    saveWorkspaceNameInput: document.getElementById("workspace-name-input"),
+    saveFormError: document.getElementById("form-error"),
     
-    // Shared Dropdown Menu
+    // Rename Modal
+    renameModalBackdrop: document.getElementById("rename-modal-backdrop"),
+    btnCloseRenameModal: document.getElementById("btn-close-rename-modal"),
+    btnRenameCancel: document.getElementById("btn-rename-cancel"),
+    btnRenameSubmit: document.getElementById("btn-rename-submit"),
+    renameForm: document.getElementById("rename-tabset-form"),
+    renameWorkspaceNameInput: document.getElementById("rename-workspace-name-input"),
+    renameFormError: document.getElementById("rename-form-error"),
+
+    // Update Confirmation Modal
+    updateModalBackdrop: document.getElementById("update-modal-backdrop"),
+    btnCloseUpdateModal: document.getElementById("btn-close-update-modal"),
+    btnUpdateCancel: document.getElementById("btn-update-cancel"),
+    btnUpdateConfirm: document.getElementById("btn-update-confirm"),
+    updateTargetName: document.getElementById("update-target-name"),
+
+    // Delete Confirmation Modal
+    deleteModalBackdrop: document.getElementById("delete-modal-backdrop"),
+    btnCloseDeleteModal: document.getElementById("btn-close-delete-modal"),
+    btnDeleteCancel: document.getElementById("btn-delete-cancel"),
+    btnDeleteConfirm: document.getElementById("btn-delete-confirm"),
+    deleteTargetName: document.getElementById("delete-target-name"),
+
+    // Context Dropdown Menu
     dropdownMenu: document.getElementById("card-dropdown-menu")
   };
 
   // ==========================================================================
-  // Storage Helper Functions (chrome.storage.local under key 'tabsets')
+  // MODULE 1: Toast Notification Controller
   // ==========================================================================
+  let toastTimer = null;
 
-  /**
-   * Retrieves array of saved TabSet objects asynchronously.
-   * Key: { tabsets: [...] }
-   */
-  async function getTabSets() {
-    return new Promise((resolve) => {
-      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.get(["tabsets"], (result) => {
-          if (chrome.runtime.lastError) {
-            console.error("[TabSets] Storage error:", chrome.runtime.lastError);
-            resolve(INITIAL_MOCK_TABSETS);
-            return;
-          }
-          if (result && Array.isArray(result.tabsets)) {
-            resolve(result.tabsets);
-          } else {
-            // Seed initial mock tabsets if storage key is empty
-            chrome.storage.local.set({ tabsets: INITIAL_MOCK_TABSETS }, () => {
-              resolve(INITIAL_MOCK_TABSETS);
-            });
-          }
-        });
+  const ToastController = {
+    show(message, type = "success", duration = 3000) {
+      if (!DOM.toastBanner) return;
+
+      if (toastTimer) clearTimeout(toastTimer);
+
+      DOM.toastMessage.textContent = message;
+      DOM.toastBanner.className = `toast-banner ${type}`;
+
+      if (type === "success") {
+        DOM.toastIcon.innerHTML = `
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"></polyline>
+          </svg>
+        `;
       } else {
-        // Fallback for local browser testing without extension context
-        try {
-          const localData = localStorage.getItem("tabsets");
-          if (localData) {
-            const parsed = JSON.parse(localData);
-            if (Array.isArray(parsed)) {
-              resolve(parsed);
+        DOM.toastIcon.innerHTML = `
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="8" x2="12" y2="12"></line>
+            <line x1="12" y1="16" x2="12.01" y2="16"></line>
+          </svg>
+        `;
+      }
+
+      DOM.toastBanner.classList.remove("hidden");
+
+      toastTimer = setTimeout(() => {
+        DOM.toastBanner.classList.add("hidden");
+      }, duration);
+    }
+  };
+
+  // ==========================================================================
+  // MODULE 2: Storage Manager Interface (chrome.storage.local key 'tabsets')
+  // ==========================================================================
+  const StorageManager = {
+    async getTabSets() {
+      return new Promise((resolve) => {
+        if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+          chrome.storage.local.get(["tabsets"], (result) => {
+            if (chrome.runtime.lastError) {
+              console.error("[TabSets] Storage error:", chrome.runtime.lastError);
+              resolve(INITIAL_MOCK_TABSETS);
               return;
             }
+            if (result && Array.isArray(result.tabsets)) {
+              resolve(result.tabsets);
+            } else {
+              chrome.storage.local.set({ tabsets: INITIAL_MOCK_TABSETS }, () => {
+                resolve(INITIAL_MOCK_TABSETS);
+              });
+            }
+          });
+        } else {
+          try {
+            const localData = localStorage.getItem("tabsets");
+            if (localData) {
+              const parsed = JSON.parse(localData);
+              if (Array.isArray(parsed)) {
+                resolve(parsed);
+                return;
+              }
+            }
+            localStorage.setItem("tabsets", JSON.stringify(INITIAL_MOCK_TABSETS));
+            resolve(INITIAL_MOCK_TABSETS);
+          } catch (e) {
+            console.error("[TabSets] LocalStorage fallback error:", e);
+            resolve(INITIAL_MOCK_TABSETS);
           }
-          localStorage.setItem("tabsets", JSON.stringify(INITIAL_MOCK_TABSETS));
-          resolve(INITIAL_MOCK_TABSETS);
-        } catch (e) {
-          console.error("[TabSets] LocalStorage fallback error:", e);
-          resolve(INITIAL_MOCK_TABSETS);
         }
-      }
-    });
-  }
+      });
+    },
 
-  /**
-   * Internal helper to persist array of tabsets to chrome.storage.local
-   */
-  async function persistTabSets(tabSetsArray) {
-    return new Promise((resolve) => {
-      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-        chrome.storage.local.set({ tabsets: tabSetsArray }, () => {
-          if (chrome.runtime.lastError) {
-            console.error("[TabSets] Error persisting tabsets:", chrome.runtime.lastError);
-            resolve(false);
-          } else {
+    async persistTabSets(tabSetsArray) {
+      return new Promise((resolve) => {
+        if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+          chrome.storage.local.set({ tabsets: tabSetsArray }, () => {
+            if (chrome.runtime.lastError) {
+              console.error("[TabSets] Error saving to storage:", chrome.runtime.lastError);
+              resolve(false);
+            } else {
+              resolve(true);
+            }
+          });
+        } else {
+          try {
+            localStorage.setItem("tabsets", JSON.stringify(tabSetsArray));
             resolve(true);
+          } catch (e) {
+            console.error("[TabSets] LocalStorage write error:", e);
+            resolve(false);
           }
-        });
-      } else {
-        try {
-          localStorage.setItem("tabsets", JSON.stringify(tabSetsArray));
-          resolve(true);
-        } catch (e) {
-          console.error("[TabSets] LocalStorage persist error:", e);
-          resolve(false);
         }
+      });
+    },
+
+    async saveTabSet(tabSet) {
+      if (!tabSet || !tabSet.id || !tabSet.name || !Array.isArray(tabSet.tabs)) {
+        console.error("[TabSets] Invalid TabSet object:", tabSet);
+        return false;
       }
-    });
-  }
 
-  /**
-   * Saves or updates a single TabSet object into storage.
-   * @param {Object} tabSet
-   * @returns {Promise<boolean>}
-   */
-  async function saveTabSet(tabSet) {
-    if (!tabSet || !tabSet.id || !tabSet.name || !Array.isArray(tabSet.tabs)) {
-      console.error("[TabSets] Invalid TabSet object:", tabSet);
-      return false;
-    }
+      const currentTabSets = await this.getTabSets();
+      const index = currentTabSets.findIndex((s) => s.id === tabSet.id);
 
-    const currentTabSets = await getTabSets();
-    const index = currentTabSets.findIndex((s) => s.id === tabSet.id);
-
-    if (index >= 0) {
-      currentTabSets[index] = tabSet;
-    } else {
-      currentTabSets.unshift(tabSet);
-    }
-
-    return persistTabSets(currentTabSets);
-  }
-
-  /**
-   * Deletes a TabSet object by ID from storage.
-   * @param {string} id
-   * @returns {Promise<boolean>}
-   */
-  async function deleteTabSet(id) {
-    if (!id) return false;
-    const currentTabSets = await getTabSets();
-    const filtered = currentTabSets.filter((s) => s.id !== id);
-    return persistTabSets(filtered);
-  }
-
-  /**
-   * Updates an existing TabSet object in storage.
-   * @param {Object} tabSet
-   * @returns {Promise<boolean>}
-   */
-  async function updateTabSet(tabSet) {
-    return saveTabSet(tabSet);
-  }
-
-  // Expose storage helpers to global window scope for modular access & testing
-  window.getTabSets = getTabSets;
-  window.saveTabSet = saveTabSet;
-  window.deleteTabSet = deleteTabSet;
-  window.updateTabSet = updateTabSet;
-
-  // ==========================================================================
-  // Chrome Tabs API Integration & URL Filtering
-  // ==========================================================================
-
-  /**
-   * Checks if URL is a standard web page suitable for restoration.
-   * Ignores un-restorable internal Chrome pages (chrome://, chrome-extension://, etc.)
-   */
-  function isRestorableUrl(url) {
-    if (!url || typeof url !== "string") return false;
-    const trimmed = url.trim().toLowerCase();
-    if (
-      trimmed.startsWith("chrome://") ||
-      trimmed.startsWith("chrome-extension://") ||
-      trimmed.startsWith("about:") ||
-      trimmed.startsWith("edge://") ||
-      trimmed.startsWith("view-source:")
-    ) {
-      return false;
-    }
-    return true;
-  }
-
-  /**
-   * Formats a missing tab title safely.
-   */
-  function formatDefaultTitle(url) {
-    if (!url) return "Untitled Tab";
-    try {
-      const parsed = new URL(url);
-      return parsed.hostname || "Untitled Tab";
-    } catch (e) {
-      return "Untitled Tab";
-    }
-  }
-
-  /**
-   * Queries current active browser window for open tabs using chrome.tabs.query.
-   * Captures for each tab: url, title, favicon, index, pinned.
-   */
-  async function getCurrentWindowTabs() {
-    return new Promise((resolve) => {
-      if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.query) {
-        chrome.tabs.query({ currentWindow: true }, (tabs) => {
-          if (chrome.runtime.lastError || !tabs) {
-            console.error("[TabSets] Tabs query error:", chrome.runtime.lastError);
-            resolve([]);
-            return;
-          }
-
-          const validTabs = tabs
-            .filter((t) => isRestorableUrl(t.url || t.pendingUrl))
-            .map((t, idx) => ({
-              url: t.url || t.pendingUrl || "",
-              title: (t.title && t.title.trim()) ? t.title.trim() : formatDefaultTitle(t.url || t.pendingUrl),
-              favicon: t.favIconUrl || "",
-              index: typeof t.index === "number" ? t.index : idx,
-              pinned: Boolean(t.pinned)
-            }));
-
-          resolve(validTabs);
-        });
+      if (index >= 0) {
+        currentTabSets[index] = tabSet;
       } else {
-        // Fallback mock tabs when testing popup UI directly in browser
-        const mockCurrentTabs = [
-          {
-            url: "https://owasp.org/www-project-top-ten/",
-            title: "OWASP Top 10 Web Application Security Risks",
-            favicon: "https://owasp.org/assets/images/favicon.ico",
-            index: 0,
-            pinned: true
-          },
-          {
-            url: "https://github.com/topics/network-security",
-            title: "GitHub - Network Security Tools",
-            favicon: "https://github.githubassets.com/favicons/favicon.png",
-            index: 1,
-            pinned: false
-          },
-          {
-            url: "https://leetcode.com/problemset/all/",
-            title: "LeetCode Top Interview Questions",
-            favicon: "https://leetcode.com/favicon.ico",
-            index: 2,
-            pinned: false
-          }
-        ];
-        resolve(mockCurrentTabs);
+        currentTabSets.unshift(tabSet);
       }
-    });
-  }
+
+      return this.persistTabSets(currentTabSets);
+    },
+
+    async deleteTabSet(id) {
+      if (!id) return false;
+      const currentTabSets = await this.getTabSets();
+      const filtered = currentTabSets.filter((s) => s.id !== id);
+      return this.persistTabSets(filtered);
+    },
+
+    async updateTabSet(tabSet) {
+      return this.saveTabSet(tabSet);
+    }
+  };
+
+  // Expose storage helpers to window
+  window.getTabSets = StorageManager.getTabSets.bind(StorageManager);
+  window.saveTabSet = StorageManager.saveTabSet.bind(StorageManager);
+  window.deleteTabSet = StorageManager.deleteTabSet.bind(StorageManager);
+  window.updateTabSet = StorageManager.updateTabSet.bind(StorageManager);
+
+  // ==========================================================================
+  // MODULE 3: Tab Manager (Chrome Tabs API & URL Sanitization)
+  // ==========================================================================
+  const TabManager = {
+    isRestorableUrl(url) {
+      if (!url || typeof url !== "string") return false;
+      const trimmed = url.trim().toLowerCase();
+      if (
+        trimmed.startsWith("chrome://") ||
+        trimmed.startsWith("chrome-extension://") ||
+        trimmed.startsWith("about:") ||
+        trimmed.startsWith("edge://") ||
+        trimmed.startsWith("view-source:")
+      ) {
+        return false;
+      }
+      return true;
+    },
+
+    formatDefaultTitle(url) {
+      if (!url) return "Untitled Tab";
+      try {
+        const parsed = new URL(url);
+        return parsed.hostname || "Untitled Tab";
+      } catch (e) {
+        return "Untitled Tab";
+      }
+    },
+
+    async getCurrentWindowTabs() {
+      return new Promise((resolve) => {
+        if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.query) {
+          chrome.tabs.query({ currentWindow: true }, (tabs) => {
+            if (chrome.runtime.lastError || !tabs) {
+              console.error("[TabSets] Tabs query error:", chrome.runtime.lastError);
+              resolve([]);
+              return;
+            }
+
+            const validTabs = tabs
+              .filter((t) => this.isRestorableUrl(t.url || t.pendingUrl))
+              .map((t, idx) => ({
+                url: t.url || t.pendingUrl || "",
+                title: (t.title && t.title.trim()) ? t.title.trim() : this.formatDefaultTitle(t.url || t.pendingUrl),
+                favicon: t.favIconUrl || "",
+                index: typeof t.index === "number" ? t.index : idx,
+                pinned: Boolean(t.pinned)
+              }));
+
+            resolve(validTabs);
+          });
+        } else {
+          // Fallback mock tabs for browser preview mode
+          const mockCurrentTabs = [
+            {
+              url: "https://owasp.org/www-project-top-ten/",
+              title: "OWASP Top 10 Web Application Security Risks",
+              favicon: "https://owasp.org/assets/images/favicon.ico",
+              index: 0,
+              pinned: true
+            },
+            {
+              url: "https://github.com/topics/network-security",
+              title: "GitHub - Network Security Tools",
+              favicon: "https://github.githubassets.com/favicons/favicon.png",
+              index: 1,
+              pinned: false
+            },
+            {
+              url: "https://leetcode.com/problemset/all/",
+              title: "LeetCode Top Interview Questions",
+              favicon: "https://leetcode.com/favicon.ico",
+              index: 2,
+              pinned: false
+            }
+          ];
+          resolve(mockCurrentTabs);
+        }
+      });
+    }
+  };
+
+  // ==========================================================================
+  // MODULE 4: Restore Manager (FEATURE 1 — RESTORE)
+  // Creates a NEW browser window, restores all valid tabs preserving order & pinned state
+  // ==========================================================================
+  const RestoreManager = {
+    async restoreWorkspace(tabSet) {
+      if (!tabSet || !Array.isArray(tabSet.tabs) || tabSet.tabs.length === 0) {
+        ToastController.show("This workspace contains no tabs to restore.", "error");
+        return;
+      }
+
+      // Filter valid URLs and sort by index
+      const validTabs = tabSet.tabs
+        .filter((t) => TabManager.isRestorableUrl(t.url))
+        .sort((a, b) => (a.index || 0) - (b.index || 0));
+
+      if (validTabs.length === 0) {
+        ToastController.show("No valid web pages found in this workspace.", "error");
+        return;
+      }
+
+      if (typeof chrome !== "undefined" && chrome.windows && chrome.windows.create) {
+        try {
+          // Always create a NEW window with the first tab
+          chrome.windows.create({ url: validTabs[0].url }, (newWindow) => {
+            if (chrome.runtime.lastError || !newWindow) {
+              console.error("[TabSets] Failed to create browser window:", chrome.runtime.lastError);
+              ToastController.show("Failed to create new browser window.", "error");
+              return;
+            }
+
+            // Set pinned status for the first tab if required
+            if (validTabs[0].pinned && newWindow.tabs && newWindow.tabs[0]) {
+              chrome.tabs.update(newWindow.tabs[0].id, { pinned: true });
+            }
+
+            // Restore subsequent tabs sequentially, preserving order & pinned state
+            for (let i = 1; i < validTabs.length; i++) {
+              const tabData = validTabs[i];
+              chrome.tabs.create(
+                {
+                  windowId: newWindow.id,
+                  url: tabData.url,
+                  pinned: Boolean(tabData.pinned),
+                  index: i
+                },
+                () => {
+                  if (chrome.runtime.lastError) {
+                    console.warn(`[TabSets] Failed restoring tab (${tabData.url}):`, chrome.runtime.lastError.message);
+                  }
+                }
+              );
+            }
+
+            ToastController.show(`Restored "${tabSet.name}" (${validTabs.length} tabs) in new window.`, "success");
+          });
+        } catch (err) {
+          console.error("[TabSets] Window restoration error:", err);
+          ToastController.show("Restoration error occurred.", "error");
+        }
+      } else {
+        // Fallback for standalone browser preview mode
+        const tabUrls = validTabs.map((t) => t.url);
+        alert(`[Browser Mode] Restoring workspace "${tabSet.name}" in a NEW window (${validTabs.length} tabs):\n` + tabUrls.join("\n"));
+        ToastController.show(`Restored "${tabSet.name}" (${validTabs.length} tabs).`, "success");
+      }
+    }
+  };
 
   // ==========================================================================
   // Relative Timestamp Generator
   // ==========================================================================
-
-  /**
-   * Formats timestamp into relative human-readable string.
-   * Returns: "Just now", "1 minute ago", "5 minutes ago", "1 hour ago", "2 hours ago", "Yesterday", "3 days ago"
-   */
   function formatRelativeTime(timestamp) {
     if (!timestamp) return "Just now";
     const elapsedMs = Date.now() - timestamp;
@@ -407,9 +506,6 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  /**
-   * Folder icon SVG helper with color tint
-   */
   function getFolderIconSvg(color = "#6366f1") {
     return `
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -418,25 +514,24 @@ document.addEventListener("DOMContentLoaded", () => {
     `;
   }
 
-  // ==========================================================================
-  // Render Logic
-  // ==========================================================================
+  function escapeHtml(str) {
+    if (!str) return "";
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
 
-  /**
-   * Filters and renders the workspace cards list in the popup UI
-   */
+  // ==========================================================================
+  // MODULE 5: Workspace List Renderer
+  // ==========================================================================
   function renderWorkspaces() {
     const query = AppState.searchQuery.trim().toLowerCase();
     
-    // Filter workspaces by search term
     const filteredSets = AppState.tabSets.filter((set) =>
       set.name.toLowerCase().includes(query)
     );
 
-    // Update Header Pill Count
     DOM.tabsetCount.textContent = AppState.tabSets.length;
-
-    // Clear existing cards
     DOM.tabsetsList.innerHTML = "";
 
     if (filteredSets.length === 0) {
@@ -456,7 +551,6 @@ document.addEventListener("DOMContentLoaded", () => {
     DOM.emptyState.classList.add("hidden");
     DOM.tabsetsList.classList.remove("hidden");
 
-    // Render workspace cards
     filteredSets.forEach((set) => {
       const card = document.createElement("div");
       card.className = "workspace-card";
@@ -493,22 +587,20 @@ document.addEventListener("DOMContentLoaded", () => {
         </div>
       `;
 
-      // Card click listener (Open workspace)
+      // Clicking card triggers RESTORE in a NEW window
       card.addEventListener("click", (e) => {
         if (e.target.closest(".three-dot-btn")) return;
-        handleOpenWorkspace(set.id);
+        RestoreManager.restoreWorkspace(set);
       });
 
-      // Card keyboard Enter/Space key listener
       card.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") {
           if (e.target.closest(".three-dot-btn")) return;
           e.preventDefault();
-          handleOpenWorkspace(set.id);
+          RestoreManager.restoreWorkspace(set);
         }
       });
 
-      // Three-dot options menu listener
       const threeDotBtn = card.querySelector(".three-dot-btn");
       threeDotBtn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -519,114 +611,266 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  /**
-   * Escape HTML to prevent XSS issues
-   */
-  function escapeHtml(str) {
-    if (!str) return "";
-    const div = document.createElement("div");
-    div.textContent = str;
-    return div.innerHTML;
-  }
-
   // ==========================================================================
-  // Form Error Handling & Validation
+  // MODULE 6: Modal Controller (Save, Rename, Update, Delete)
   // ==========================================================================
+  const ModalController = {
+    // ---------------- Save Modal ----------------
+    openSaveModal() {
+      closeDropdownMenu();
+      DOM.saveModalBackdrop.classList.remove("hidden");
+      DOM.saveModalBackdrop.setAttribute("aria-hidden", "false");
+      DOM.saveWorkspaceNameInput.value = "";
+      this.hideFormError(DOM.saveFormError);
+      setTimeout(() => DOM.saveWorkspaceNameInput.focus(), 50);
+    },
 
-  function showFormError(message) {
-    DOM.formError.textContent = message;
-    DOM.formError.classList.remove("hidden");
-  }
+    closeSaveModal() {
+      DOM.saveModalBackdrop.classList.add("hidden");
+      DOM.saveModalBackdrop.setAttribute("aria-hidden", "true");
+      this.hideFormError(DOM.saveFormError);
+    },
 
-  function hideFormError() {
-    DOM.formError.textContent = "";
-    DOM.formError.classList.add("hidden");
-  }
+    async handleSaveSubmit(e) {
+      e.preventDefault();
+      this.hideFormError(DOM.saveFormError);
 
-  // ==========================================================================
-  // Modal Interaction Handlers
-  // ==========================================================================
+      const trimmedName = DOM.saveWorkspaceNameInput.value.trim();
 
-  function openSaveModal() {
-    DOM.saveModalBackdrop.classList.remove("hidden");
-    DOM.saveModalBackdrop.setAttribute("aria-hidden", "false");
-    DOM.workspaceNameInput.value = "";
-    hideFormError();
-    closeDropdownMenu();
-    setTimeout(() => {
-      DOM.workspaceNameInput.focus();
-    }, 50);
-  }
+      if (!trimmedName) {
+        this.showFormError(DOM.saveFormError, "Workspace name cannot be empty.");
+        DOM.saveWorkspaceNameInput.focus();
+        return;
+      }
 
-  function closeSaveModal() {
-    DOM.saveModalBackdrop.classList.add("hidden");
-    DOM.saveModalBackdrop.setAttribute("aria-hidden", "true");
-    hideFormError();
-  }
+      const isDuplicate = AppState.tabSets.some(
+        (set) => set.name.toLowerCase() === trimmedName.toLowerCase()
+      );
 
-  /**
-   * Handles Save Modal Form submission
-   */
-  async function handleSaveFormSubmit(e) {
-    e.preventDefault();
-    hideFormError();
+      if (isDuplicate) {
+        this.showFormError(DOM.saveFormError, "A workspace with this name already exists.");
+        DOM.saveWorkspaceNameInput.focus();
+        return;
+      }
 
-    const rawName = DOM.workspaceNameInput.value;
-    const trimmedName = rawName.trim();
+      DOM.btnSaveSubmit.disabled = true;
 
-    // 1. Validate empty name
-    if (!trimmedName) {
-      showFormError("Workspace name cannot be empty.");
-      DOM.workspaceNameInput.focus();
-      return;
+      const activeTabs = await TabManager.getCurrentWindowTabs();
+
+      if (!activeTabs || activeTabs.length === 0) {
+        this.showFormError(DOM.saveFormError, "No saveable browser tabs found in current window.");
+        DOM.btnSaveSubmit.disabled = false;
+        return;
+      }
+
+      const now = Date.now();
+      const newTabSet = {
+        id: `ts-${now}-${Math.random().toString(36).substring(2, 7)}`,
+        name: trimmedName,
+        createdAt: now,
+        updatedAt: now,
+        tabs: activeTabs
+      };
+
+      const success = await StorageManager.saveTabSet(newTabSet);
+      DOM.btnSaveSubmit.disabled = false;
+
+      if (!success) {
+        this.showFormError(DOM.saveFormError, "Storage error occurred while saving workspace.");
+        return;
+      }
+
+      AppState.tabSets = await StorageManager.getTabSets();
+      renderWorkspaces();
+      this.closeSaveModal();
+      ToastController.show(`Workspace "${trimmedName}" saved successfully.`, "success");
+    },
+
+    // ---------------- Rename Modal (FEATURE 2 — RENAME) ----------------
+    openRenameModal(tabSetId) {
+      closeDropdownMenu();
+      const set = AppState.tabSets.find((s) => s.id === tabSetId);
+      if (!set) return;
+
+      AppState.targetWorkspaceId = tabSetId;
+      DOM.renameWorkspaceNameInput.value = set.name;
+      this.hideFormError(DOM.renameFormError);
+
+      DOM.renameModalBackdrop.classList.remove("hidden");
+      DOM.renameModalBackdrop.setAttribute("aria-hidden", "false");
+      setTimeout(() => DOM.renameWorkspaceNameInput.focus(), 50);
+    },
+
+    closeRenameModal() {
+      DOM.renameModalBackdrop.classList.add("hidden");
+      DOM.renameModalBackdrop.setAttribute("aria-hidden", "true");
+      this.hideFormError(DOM.renameFormError);
+      AppState.targetWorkspaceId = null;
+    },
+
+    async handleRenameSubmit(e) {
+      e.preventDefault();
+      this.hideFormError(DOM.renameFormError);
+
+      const targetId = AppState.targetWorkspaceId;
+      const set = AppState.tabSets.find((s) => s.id === targetId);
+      if (!set) {
+        this.closeRenameModal();
+        return;
+      }
+
+      const trimmedName = DOM.renameWorkspaceNameInput.value.trim();
+
+      if (!trimmedName) {
+        this.showFormError(DOM.renameFormError, "Workspace name cannot be empty.");
+        DOM.renameWorkspaceNameInput.focus();
+        return;
+      }
+
+      const isDuplicate = AppState.tabSets.some(
+        (s) => s.id !== targetId && s.name.toLowerCase() === trimmedName.toLowerCase()
+      );
+
+      if (isDuplicate) {
+        this.showFormError(DOM.renameFormError, "A workspace with this name already exists.");
+        DOM.renameWorkspaceNameInput.focus();
+        return;
+      }
+
+      DOM.btnRenameSubmit.disabled = true;
+
+      set.name = trimmedName;
+      set.updatedAt = Date.now();
+
+      const success = await StorageManager.updateTabSet(set);
+      DOM.btnRenameSubmit.disabled = false;
+
+      if (!success) {
+        this.showFormError(DOM.renameFormError, "Failed to update workspace name.");
+        return;
+      }
+
+      AppState.tabSets = await StorageManager.getTabSets();
+      renderWorkspaces();
+      this.closeRenameModal();
+      ToastController.show(`Renamed workspace to "${trimmedName}".`, "success");
+    },
+
+    // ---------------- Update Modal (FEATURE 4 — UPDATE EXISTING SET) ----------------
+    openUpdateModal(tabSetId) {
+      closeDropdownMenu();
+      const set = AppState.tabSets.find((s) => s.id === tabSetId);
+      if (!set) return;
+
+      AppState.targetWorkspaceId = tabSetId;
+      DOM.updateTargetName.textContent = set.name;
+
+      DOM.updateModalBackdrop.classList.remove("hidden");
+      DOM.updateModalBackdrop.setAttribute("aria-hidden", "false");
+    },
+
+    closeUpdateModal() {
+      DOM.updateModalBackdrop.classList.add("hidden");
+      DOM.updateModalBackdrop.setAttribute("aria-hidden", "true");
+      AppState.targetWorkspaceId = null;
+    },
+
+    async handleUpdateConfirm() {
+      const targetId = AppState.targetWorkspaceId;
+      const set = AppState.tabSets.find((s) => s.id === targetId);
+      if (!set) {
+        this.closeUpdateModal();
+        return;
+      }
+
+      DOM.btnUpdateConfirm.disabled = true;
+
+      const activeTabs = await TabManager.getCurrentWindowTabs();
+
+      if (!activeTabs || activeTabs.length === 0) {
+        DOM.btnUpdateConfirm.disabled = false;
+        ToastController.show("No saveable tabs found in current window.", "error");
+        this.closeUpdateModal();
+        return;
+      }
+
+      // Replace saved tabs with current window's tabs, updating timestamp while preserving name & ID
+      set.tabs = activeTabs;
+      set.updatedAt = Date.now();
+
+      const success = await StorageManager.updateTabSet(set);
+      DOM.btnUpdateConfirm.disabled = false;
+
+      if (!success) {
+        ToastController.show("Failed to update workspace tabs.", "error");
+        return;
+      }
+
+      AppState.tabSets = await StorageManager.getTabSets();
+      renderWorkspaces();
+      this.closeUpdateModal();
+      ToastController.show(`Updated "${set.name}" with ${activeTabs.length} tabs.`, "success");
+    },
+
+    // ---------------- Delete Modal (FEATURE 3 — DELETE) ----------------
+    openDeleteModal(tabSetId) {
+      closeDropdownMenu();
+      const set = AppState.tabSets.find((s) => s.id === tabSetId);
+      if (!set) return;
+
+      AppState.targetWorkspaceId = tabSetId;
+      DOM.deleteTargetName.textContent = set.name;
+
+      DOM.deleteModalBackdrop.classList.remove("hidden");
+      DOM.deleteModalBackdrop.setAttribute("aria-hidden", "false");
+    },
+
+    closeDeleteModal() {
+      DOM.deleteModalBackdrop.classList.add("hidden");
+      DOM.deleteModalBackdrop.setAttribute("aria-hidden", "true");
+      AppState.targetWorkspaceId = null;
+    },
+
+    async handleDeleteConfirm() {
+      const targetId = AppState.targetWorkspaceId;
+      const set = AppState.tabSets.find((s) => s.id === targetId);
+      if (!set) {
+        this.closeDeleteModal();
+        return;
+      }
+
+      DOM.btnDeleteConfirm.disabled = true;
+
+      const success = await StorageManager.deleteTabSet(targetId);
+      DOM.btnDeleteConfirm.disabled = false;
+
+      if (!success) {
+        ToastController.show("Failed to delete workspace.", "error");
+        return;
+      }
+
+      AppState.tabSets = await StorageManager.getTabSets();
+      renderWorkspaces();
+      this.closeDeleteModal();
+      ToastController.show(`Deleted workspace "${set.name}".`, "success");
+    },
+
+    // Helpers
+    showFormError(element, message) {
+      element.textContent = message;
+      element.classList.remove("hidden");
+    },
+
+    hideFormError(element) {
+      element.textContent = "";
+      element.classList.add("hidden");
     }
-
-    // 2. Validate duplicate names (case-insensitive)
-    const isDuplicate = AppState.tabSets.some(
-      (set) => set.name.toLowerCase() === trimmedName.toLowerCase()
-    );
-
-    if (isDuplicate) {
-      showFormError("A workspace with this name already exists. Please choose a unique name.");
-      DOM.workspaceNameInput.focus();
-      return;
-    }
-
-    // 3. Query current active browser window tabs
-    const activeTabs = await getCurrentWindowTabs();
-
-    if (!activeTabs || activeTabs.length === 0) {
-      showFormError("No saveable browser tabs found in the current window.");
-      return;
-    }
-
-    // 4. Construct TabSet object
-    const now = Date.now();
-    const newTabSet = {
-      id: `ts-${now}-${Math.random().toString(36).substring(2, 7)}`,
-      name: trimmedName,
-      createdAt: now,
-      updatedAt: now,
-      tabs: activeTabs
-    };
-
-    // 5. Persist to storage using saveTabSet helper
-    const success = await saveTabSet(newTabSet);
-    if (!success) {
-      showFormError("Storage error occurred while saving the workspace.");
-      return;
-    }
-
-    // 6. Refresh state & UI immediately
-    AppState.tabSets = await getTabSets();
-    renderWorkspaces();
-    closeSaveModal();
-  }
+  };
 
   // ==========================================================================
-  // Dropdown Context Menu Interaction
+  // MODULE 7: Context Dropdown Menu Management (FEATURE 5 — CONTEXT MENU)
+  // Supports 4 actions: Restore, Update, Rename, Delete
   // ==========================================================================
-
   function toggleDropdownMenu(anchorBtn, tabSetId) {
     if (AppState.activeDropdownId === tabSetId && !DOM.dropdownMenu.classList.contains("hidden")) {
       closeDropdownMenu();
@@ -641,11 +885,11 @@ document.addEventListener("DOMContentLoaded", () => {
     DOM.dropdownMenu.classList.remove("hidden");
 
     let topPos = btnRect.bottom + 4;
-    let leftPos = btnRect.right - 170;
+    let leftPos = btnRect.right - 160;
 
     if (leftPos < 10) leftPos = 10;
-    if (topPos + 120 > popupRect.bottom) {
-      topPos = btnRect.top - 125;
+    if (topPos + 150 > popupRect.bottom) {
+      topPos = btnRect.top - 155;
     }
 
     DOM.dropdownMenu.style.top = `${topPos}px`;
@@ -657,7 +901,7 @@ document.addEventListener("DOMContentLoaded", () => {
     AppState.activeDropdownId = null;
   }
 
-  // Handle dropdown action selections
+  // Dropdown items click dispatcher
   DOM.dropdownMenu.addEventListener("click", async (e) => {
     const actionItem = e.target.closest(".dropdown-item");
     if (!actionItem) return;
@@ -668,136 +912,74 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (!tabSetId) return;
 
-    if (action === "open") {
-      handleOpenWorkspace(tabSetId);
+    const set = AppState.tabSets.find((s) => s.id === tabSetId);
+    if (!set) return;
+
+    if (action === "restore") {
+      RestoreManager.restoreWorkspace(set);
+    } else if (action === "update") {
+      ModalController.openUpdateModal(tabSetId);
     } else if (action === "rename") {
-      handleRenameWorkspace(tabSetId);
+      ModalController.openRenameModal(tabSetId);
     } else if (action === "delete") {
-      handleDeleteWorkspace(tabSetId);
+      ModalController.openDeleteModal(tabSetId);
     }
   });
 
-  /**
-   * Opens workspace tabs in a new browser window
-   */
-  function handleOpenWorkspace(tabSetId) {
-    const set = AppState.tabSets.find((s) => s.id === tabSetId);
-    if (!set || !set.tabs || set.tabs.length === 0) {
-      alert("This workspace contains no tabs to open.");
-      return;
-    }
-
-    const urls = set.tabs
-      .map((t) => t.url)
-      .filter((url) => isRestorableUrl(url));
-
-    if (urls.length === 0) {
-      alert("No valid web URLs found in this workspace.");
-      return;
-    }
-
-    if (typeof chrome !== "undefined" && chrome.windows && chrome.windows.create) {
-      chrome.windows.create({ url: urls }, () => {
-        if (chrome.runtime.lastError) {
-          console.error("[TabSets] Error restoring window:", chrome.runtime.lastError);
-        }
-      });
-    } else {
-      alert(`[Browser Preview Mode] Opening workspace "${set.name}" with ${urls.length} tabs:\n` + urls.join("\n"));
-    }
-  }
-
-  /**
-   * Handles workspace renaming
-   */
-  async function handleRenameWorkspace(tabSetId) {
-    const set = AppState.tabSets.find((s) => s.id === tabSetId);
-    if (!set) return;
-
-    const inputName = prompt("Enter new workspace name:", set.name);
-    if (inputName === null) return; // User cancelled
-
-    const trimmed = inputName.trim();
-
-    if (!trimmed) {
-      alert("Workspace name cannot be empty.");
-      return;
-    }
-
-    const isDuplicate = AppState.tabSets.some(
-      (s) => s.id !== tabSetId && s.name.toLowerCase() === trimmed.toLowerCase()
-    );
-
-    if (isDuplicate) {
-      alert("A workspace with this name already exists.");
-      return;
-    }
-
-    set.name = trimmed;
-    set.updatedAt = Date.now();
-
-    await updateTabSet(set);
-    AppState.tabSets = await getTabSets();
-    renderWorkspaces();
-  }
-
-  /**
-   * Handles workspace deletion
-   */
-  async function handleDeleteWorkspace(tabSetId) {
-    const set = AppState.tabSets.find((s) => s.id === tabSetId);
-    if (!set) return;
-
-    const confirmed = confirm(`Are you sure you want to delete workspace "${set.name}"?`);
-    if (!confirmed) return;
-
-    await deleteTabSet(tabSetId);
-    AppState.tabSets = await getTabSets();
-    renderWorkspaces();
-  }
-
   // ==========================================================================
-  // Event Listeners Initialization
+  // MODULE 8: Event Listeners Initialization
   // ==========================================================================
-
   function initEventListeners() {
-    // Open Modal button
-    DOM.btnOpenSaveModal.addEventListener("click", openSaveModal);
+    // ---------------- Save Modal Events ----------------
+    DOM.btnOpenSaveModal.addEventListener("click", () => ModalController.openSaveModal());
+    DOM.btnCloseSaveModal.addEventListener("click", () => ModalController.closeSaveModal());
+    DOM.btnSaveCancel.addEventListener("click", () => ModalController.closeSaveModal());
+    DOM.saveForm.addEventListener("submit", (e) => ModalController.handleSaveSubmit(e));
+    DOM.saveWorkspaceNameInput.addEventListener("input", () => ModalController.hideFormError(DOM.saveFormError));
 
-    // Close Modal buttons
-    DOM.btnCloseModal.addEventListener("click", closeSaveModal);
-    DOM.btnModalCancel.addEventListener("click", closeSaveModal);
-
-    // Click backdrop to close
     DOM.saveModalBackdrop.addEventListener("click", (e) => {
-      if (e.target === DOM.saveModalBackdrop) {
-        closeSaveModal();
-      }
+      if (e.target === DOM.saveModalBackdrop) ModalController.closeSaveModal();
     });
 
-    // Form input error reset on typing
-    DOM.workspaceNameInput.addEventListener("input", () => {
-      if (!DOM.formError.classList.contains("hidden")) {
-        hideFormError();
-      }
+    // ---------------- Rename Modal Events ----------------
+    DOM.btnCloseRenameModal.addEventListener("click", () => ModalController.closeRenameModal());
+    DOM.btnRenameCancel.addEventListener("click", () => ModalController.closeRenameModal());
+    DOM.renameForm.addEventListener("submit", (e) => ModalController.handleRenameSubmit(e));
+    DOM.renameWorkspaceNameInput.addEventListener("input", () => ModalController.hideFormError(DOM.renameFormError));
+
+    DOM.renameModalBackdrop.addEventListener("click", (e) => {
+      if (e.target === DOM.renameModalBackdrop) ModalController.closeRenameModal();
     });
 
-    // Save Form Submission
-    DOM.saveForm.addEventListener("submit", handleSaveFormSubmit);
+    // ---------------- Update Modal Events ----------------
+    DOM.btnCloseUpdateModal.addEventListener("click", () => ModalController.closeUpdateModal());
+    DOM.btnUpdateCancel.addEventListener("click", () => ModalController.closeUpdateModal());
+    DOM.btnUpdateConfirm.addEventListener("click", () => ModalController.handleUpdateConfirm());
 
-    // Escape key closing
+    DOM.updateModalBackdrop.addEventListener("click", (e) => {
+      if (e.target === DOM.updateModalBackdrop) ModalController.closeUpdateModal();
+    });
+
+    // ---------------- Delete Modal Events ----------------
+    DOM.btnCloseDeleteModal.addEventListener("click", () => ModalController.closeDeleteModal());
+    DOM.btnDeleteCancel.addEventListener("click", () => ModalController.closeDeleteModal());
+    DOM.btnDeleteConfirm.addEventListener("click", () => ModalController.handleDeleteConfirm());
+
+    DOM.deleteModalBackdrop.addEventListener("click", (e) => {
+      if (e.target === DOM.deleteModalBackdrop) ModalController.closeDeleteModal();
+    });
+
+    // ---------------- Global Keyboard & Click Outside Handlers ----------------
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
-        if (!DOM.saveModalBackdrop.classList.contains("hidden")) {
-          closeSaveModal();
-        }
-        if (!DOM.dropdownMenu.classList.contains("hidden")) {
-          closeDropdownMenu();
-        }
+        if (!DOM.saveModalBackdrop.classList.contains("hidden")) ModalController.closeSaveModal();
+        if (!DOM.renameModalBackdrop.classList.contains("hidden")) ModalController.closeRenameModal();
+        if (!DOM.updateModalBackdrop.classList.contains("hidden")) ModalController.closeUpdateModal();
+        if (!DOM.deleteModalBackdrop.classList.contains("hidden")) ModalController.closeDeleteModal();
+        if (!DOM.dropdownMenu.classList.contains("hidden")) closeDropdownMenu();
       }
     });
 
-    // Click outside dropdown to close
     document.addEventListener("click", (e) => {
       if (!DOM.dropdownMenu.classList.contains("hidden")) {
         if (!e.target.closest(".dropdown-menu") && !e.target.closest(".three-dot-btn")) {
@@ -806,7 +988,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
 
-    // Search input filtering
+    // Search bar listeners
     DOM.searchInput.addEventListener("input", (e) => {
       AppState.searchQuery = e.target.value;
       if (AppState.searchQuery.length > 0) {
@@ -817,7 +999,6 @@ document.addEventListener("DOMContentLoaded", () => {
       renderWorkspaces();
     });
 
-    // Clear search button
     DOM.btnClearSearch.addEventListener("click", () => {
       DOM.searchInput.value = "";
       AppState.searchQuery = "";
@@ -830,10 +1011,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // ==========================================================================
   // App Initialization
   // ==========================================================================
-
   async function init() {
     initEventListeners();
-    AppState.tabSets = await getTabSets();
+    AppState.tabSets = await StorageManager.getTabSets();
     renderWorkspaces();
   }
 
